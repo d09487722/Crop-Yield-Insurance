@@ -1,13 +1,16 @@
 (define-trait insurance-trait (
     (get-policy-details
         (uint)
-        (response {
+        (
+            response             {
             premium: uint,
             coverage: uint,
             start-block: uint,
             end-block: uint,
             status: (string-ascii 20),
-        } uint)
+        }
+            uint
+        )
     )
     (submit-claim
         (uint)
@@ -33,12 +36,15 @@
 (define-constant ERR-POLICY-NOT-FOUND (err u107))
 (define-constant ERR-INVALID-PARAMETERS (err u108))
 (define-constant ERR-ORACLE-NOT-SET (err u109))
+(define-constant ERR-INVALID-REGION (err u110))
+(define-constant ERR-NO-HISTORICAL-DATA (err u111))
 
 (define-map policies
     uint
     {
         farmer: principal,
         crop-type: (string-ascii 50),
+        region: (string-ascii 50),
         expected-yield: uint,
         coverage-amount: uint,
         premium-amount: uint,
@@ -74,6 +80,48 @@
     bool
 )
 
+(define-map regional-risk-data
+    {
+        region: (string-ascii 50),
+        crop-type: (string-ascii 50),
+    }
+    {
+        base-risk-score: uint,
+        weather-factor: uint,
+        soil-quality: uint,
+        historical-loss-ratio: uint,
+        last-updated: uint,
+    }
+)
+
+(define-map historical-yields
+    {
+        region: (string-ascii 50),
+        crop-type: (string-ascii 50),
+        year: uint,
+    }
+    {
+        average-yield: uint,
+        total-policies: uint,
+        claims-ratio: uint,
+        updated-block: uint,
+    }
+)
+
+(define-map weather-conditions
+    {
+        region: (string-ascii 50),
+        season: (string-ascii 20),
+    }
+    {
+        rainfall-score: uint,
+        temperature-score: uint,
+        drought-risk: uint,
+        flood-risk: uint,
+        last-updated: uint,
+    }
+)
+
 (define-public (set-oracle-address (new-oracle principal))
     (begin
         (asserts! (is-eq tx-sender (var-get contract-owner)) ERR-NOT-AUTHORIZED)
@@ -104,10 +152,13 @@
         (expected-yield uint)
         (coverage-amount uint)
         (duration-blocks uint)
+        (region (string-ascii 50))
     )
     (let (
             (policy-id (+ (var-get policy-counter) u1))
-            (premium (calculate-premium coverage-amount duration-blocks expected-yield))
+            (premium (calculate-dynamic-premium coverage-amount duration-blocks
+                expected-yield crop-type region
+            ))
             (current-block stacks-block-height)
             (end-block (+ current-block duration-blocks))
         )
@@ -125,6 +176,7 @@
         (map-set policies policy-id {
             farmer: tx-sender,
             crop-type: crop-type,
+            region: region,
             expected-yield: expected-yield,
             coverage-amount: coverage-amount,
             premium-amount: premium,
@@ -165,6 +217,55 @@
             (time-factor (/ duration u144))
         )
         (/ (* coverage (+ base-rate (* risk-factor time-factor))) u10000)
+    )
+)
+
+(define-private (calculate-dynamic-premium
+        (coverage uint)
+        (duration uint)
+        (expected-yield uint)
+        (crop-type (string-ascii 50))
+        (region (string-ascii 50))
+    )
+    (let (
+            (base-premium (calculate-premium coverage duration expected-yield))
+            (risk-data (map-get? regional-risk-data {
+                region: region,
+                crop-type: crop-type,
+            }))
+            (weather-data (map-get? weather-conditions {
+                region: region,
+                season: "current",
+            }))
+        )
+        (match risk-data
+            regional-risk (let (
+                    (risk-multiplier (+ u100 (get base-risk-score regional-risk)))
+                    (weather-adjustment (match weather-data
+                        weather (+ u100
+                            (/
+                                (+ (get drought-risk weather)
+                                    (get flood-risk weather)
+                                )
+                                u2
+                            ))
+                        u100
+                    ))
+                    (soil-adjustment (+ u100 (get soil-quality regional-risk)))
+                    (loss-adjustment (+ u100 (get historical-loss-ratio regional-risk)))
+                )
+                (/
+                    (* base-premium
+                        (* risk-multiplier
+                            (* weather-adjustment
+                                (* soil-adjustment loss-adjustment)
+                            ))
+                    )
+                    u100000000
+                )
+            )
+            base-premium
+        )
     )
 )
 
@@ -442,13 +543,150 @@
     (ok (var-get maximum-coverage))
 )
 
-(define-public (batch-create-policies (policies-data (list 10
+(define-public (update-regional-risk-data
+        (region (string-ascii 50))
+        (crop-type (string-ascii 50))
+        (base-risk-score uint)
+        (weather-factor uint)
+        (soil-quality uint)
+        (historical-loss-ratio uint)
+    )
+    (begin
+        (asserts! (default-to false (map-get? oracle-whitelist tx-sender))
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (<= base-risk-score u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= weather-factor u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= soil-quality u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= historical-loss-ratio u100) ERR-INVALID-PARAMETERS)
+
+        (map-set regional-risk-data {
+            region: region,
+            crop-type: crop-type,
+        } {
+            base-risk-score: base-risk-score,
+            weather-factor: weather-factor,
+            soil-quality: soil-quality,
+            historical-loss-ratio: historical-loss-ratio,
+            last-updated: stacks-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-weather-conditions
+        (region (string-ascii 50))
+        (season (string-ascii 20))
+        (rainfall-score uint)
+        (temperature-score uint)
+        (drought-risk uint)
+        (flood-risk uint)
+    )
+    (begin
+        (asserts! (default-to false (map-get? oracle-whitelist tx-sender))
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (<= rainfall-score u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= temperature-score u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= drought-risk u100) ERR-INVALID-PARAMETERS)
+        (asserts! (<= flood-risk u100) ERR-INVALID-PARAMETERS)
+
+        (map-set weather-conditions {
+            region: region,
+            season: season,
+        } {
+            rainfall-score: rainfall-score,
+            temperature-score: temperature-score,
+            drought-risk: drought-risk,
+            flood-risk: flood-risk,
+            last-updated: stacks-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-public (update-historical-yields
+        (region (string-ascii 50))
+        (crop-type (string-ascii 50))
+        (year uint)
+        (average-yield uint)
+        (total-policies uint)
+        (claims-ratio uint)
+    )
+    (begin
+        (asserts! (default-to false (map-get? oracle-whitelist tx-sender))
+            ERR-NOT-AUTHORIZED
+        )
+        (asserts! (> average-yield u0) ERR-INVALID-PARAMETERS)
+        (asserts! (> total-policies u0) ERR-INVALID-PARAMETERS)
+        (asserts! (<= claims-ratio u100) ERR-INVALID-PARAMETERS)
+
+        (map-set historical-yields {
+            region: region,
+            crop-type: crop-type,
+            year: year,
+        } {
+            average-yield: average-yield,
+            total-policies: total-policies,
+            claims-ratio: claims-ratio,
+            updated-block: stacks-block-height,
+        })
+        (ok true)
+    )
+)
+
+(define-read-only (get-regional-risk-data
+        (region (string-ascii 50))
+        (crop-type (string-ascii 50))
+    )
+    (ok (map-get? regional-risk-data {
+        region: region,
+        crop-type: crop-type,
+    }))
+)
+
+(define-read-only (get-weather-conditions
+        (region (string-ascii 50))
+        (season (string-ascii 20))
+    )
+    (ok (map-get? weather-conditions {
+        region: region,
+        season: season,
+    }))
+)
+
+(define-read-only (get-historical-yields
+        (region (string-ascii 50))
+        (crop-type (string-ascii 50))
+        (year uint)
+    )
+    (ok (map-get? historical-yields {
+        region: region,
+        crop-type: crop-type,
+        year: year,
+    }))
+)
+
+(define-read-only (calculate-policy-premium-with-risk
+        (coverage uint)
+        (duration uint)
+        (expected-yield uint)
+        (crop-type (string-ascii 50))
+        (region (string-ascii 50))
+    )
+    (ok (calculate-dynamic-premium coverage duration expected-yield crop-type region))
+)
+
+(define-public (batch-create-policies (policies-data (list
+    10
     {
-    crop-type: (string-ascii 50),
-    expected-yield: uint,
-    coverage-amount: uint,
-    duration-blocks: uint,
-})))
+        crop-type: (string-ascii 50),
+        expected-yield: uint,
+        coverage-amount: uint,
+        duration-blocks: uint,
+        region: (string-ascii 50),
+    }
+)))
     (let ((total-premium (fold calculate-batch-premium policies-data u0)))
         (try! (stx-transfer? total-premium tx-sender (as-contract tx-sender)))
         (ok (map create-single-policy policies-data))
@@ -461,13 +699,15 @@
             expected-yield: uint,
             coverage-amount: uint,
             duration-blocks: uint,
+            region: (string-ascii 50),
         })
         (acc uint)
     )
     (+ acc
-        (calculate-premium (get coverage-amount policy-data)
+        (calculate-dynamic-premium (get coverage-amount policy-data)
             (get duration-blocks policy-data)
-            (get expected-yield policy-data)
+            (get expected-yield policy-data) (get crop-type policy-data)
+            (get region policy-data)
         ))
 )
 
@@ -476,12 +716,14 @@
     expected-yield: uint,
     coverage-amount: uint,
     duration-blocks: uint,
+    region: (string-ascii 50),
 }))
     (let (
             (policy-id (+ (var-get policy-counter) u1))
-            (premium (calculate-premium (get coverage-amount policy-data)
+            (premium (calculate-dynamic-premium (get coverage-amount policy-data)
                 (get duration-blocks policy-data)
-                (get expected-yield policy-data)
+                (get expected-yield policy-data) (get crop-type policy-data)
+                (get region policy-data)
             ))
             (current-block stacks-block-height)
             (end-block (+ current-block (get duration-blocks policy-data)))
@@ -489,6 +731,7 @@
         (map-set policies policy-id {
             farmer: tx-sender,
             crop-type: (get crop-type policy-data),
+            region: (get region policy-data),
             expected-yield: (get expected-yield policy-data),
             coverage-amount: (get coverage-amount policy-data),
             premium-amount: premium,
