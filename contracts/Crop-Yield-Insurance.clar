@@ -677,6 +677,58 @@
     (ok (calculate-dynamic-premium coverage duration expected-yield crop-type region))
 )
 
+(define-read-only (get-premium-breakdown
+        (coverage uint)
+        (duration uint)
+        (expected-yield uint)
+        (crop-type (string-ascii 50))
+        (region (string-ascii 50))
+    )
+    (let (
+            (base-premium (calculate-premium coverage duration expected-yield))
+            (risk-data (map-get? regional-risk-data {
+                region: region,
+                crop-type: crop-type,
+            }))
+            (weather-data (map-get? weather-conditions {
+                region: region,
+                season: "current",
+            }))
+            (risk-multiplier (match risk-data
+                r (+ u100 (get base-risk-score r))
+                u100
+            ))
+            (weather-adjustment (match weather-data
+                w (+ u100 (/ (+ (get drought-risk w) (get flood-risk w)) u2))
+                u100
+            ))
+            (soil-adjustment (match risk-data
+                r (+ u100 (get soil-quality r))
+                u100
+            ))
+            (loss-adjustment (match risk-data
+                r (+ u100 (get historical-loss-ratio r))
+                u100
+            ))
+            (final-premium (/
+                (* base-premium
+                    (* risk-multiplier
+                        (* weather-adjustment (* soil-adjustment loss-adjustment))
+                    ))
+                u100000000
+            ))
+        )
+        (ok {
+            base: base-premium,
+            risk: risk-multiplier,
+            weather: weather-adjustment,
+            soil: soil-adjustment,
+            loss: loss-adjustment,
+            total: final-premium,
+        })
+    )
+)
+
 (define-public (batch-create-policies (policies-data (list
     10
     {
