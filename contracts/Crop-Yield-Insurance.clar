@@ -527,6 +527,19 @@
     (ok (var-get contract-owner))
 )
 
+(define-read-only (get-policy-details (policy-id uint))
+    (match (map-get? policies policy-id)
+        policy (ok {
+            premium: (get premium-amount policy),
+            coverage: (get coverage-amount policy),
+            start-block: (get start-block policy),
+            end-block: (get end-block policy),
+            status: (get status policy),
+        })
+        ERR-POLICY-NOT-FOUND
+    )
+)
+
 (define-read-only (get-oracle-address)
     (ok (var-get oracle-address))
 )
